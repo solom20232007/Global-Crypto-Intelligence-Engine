@@ -225,3 +225,158 @@ def collect_okx_funding_history(
         if pause_seconds:
             time.sleep(pause_seconds)
     return [rows[key] for key in sorted(rows)]
+
+
+def _bybit_result(payload: Any, label: str) -> Mapping[str, Any]:
+    if not isinstance(payload, Mapping) or payload.get("retCode") != 0:
+        raise ValueError(f"Unexpected Bybit {label} response: {payload!r}")
+    result = payload.get("result")
+    if not isinstance(result, Mapping):
+        raise ValueError(f"Malformed Bybit {label} result")
+    return result
+
+
+def collect_bybit_funding_history(
+    category: str, symbol: str, start_ms: int, end_ms: int, *,
+    limit: int = 200, fetcher: JsonFetcher = public_json, pause_seconds: float = 0.05,
+) -> list[dict[str, Any]]:
+    """Collect Bybit V5 linear/inverse funding history in bounded time pages.
+
+    Bybit requires startTime and endTime together. The API returns at most
+    200 records per request, so a full page is continued from its oldest row.
+    """
+    if category not in {"linear", "inverse"}:
+        raise ValueError("Bybit category must be 'linear' or 'inverse'")
+    if start_ms < 0 or end_ms <= start_ms:
+        raise ValueError("Require 0 <= start_ms < end_ms")
+    if not 1 <= limit <= 200:
+        raise ValueError("Bybit funding limit must be between 1 and 200")
+    cursor_end = end_ms
+    rows: dict[int, dict[str, Any]] = {}
+    while cursor_end > start_ms:
+        payload = _get(fetcher, "https://api.bybit.com", "/v5/market/funding/history", {
+            "category": category, "symbol": symbol.upper(),
+            "startTime": start_ms, "endTime": cursor_end, "limit": limit,
+        })
+        result = _bybit_result(payload, "funding")
+        data = result.get("list", [])
+        if not data:
+            break
+        timestamps = []
+        for item in data:
+            timestamp = int(item["fundingRateTimestamp"])
+            timestamps.append(timestamp)
+            if start_ms <= timestamp < end_ms:
+                rows[timestamp] = {
+                    "venue": "bybit", "market_type": "perpetual",
+                    "instrument": symbol.upper(), "category": category,
+                    "metric": "funding_rate", "event_time": utc_iso(timestamp),
+                    "event_time_ms": timestamp, "funding_rate": str(item["fundingRate"]),
+                    "source_endpoint": "/v5/market/funding/history",
+                }
+        oldest = min(timestamps)
+        if oldest >= cursor_end:
+            raise RuntimeError("Bybit funding pagination did not move backwards")
+        if len(data) < limit:
+            break
+        cursor_end = oldest - 1
+        if pause_seconds:
+            time.sleep(pause_seconds)
+    return [rows[key] for key in sorted(rows)]
+
+
+def collect_bybit_open_interest_history(
+    category: str, symbol: str, interval_time: str, start_ms: int, end_ms: int, *,
+    limit: int = 200, fetcher: JsonFetcher = public_json, pause_seconds: float = 0.05,
+) -> list[dict[str, Any]]:
+    """Collect Bybit V5 historical OI observations using its response cursor."""
+    if category not in {"linear", "inverse"}:
+        raise ValueError("Bybit category must be 'linear' or 'inverse'")
+    if interval_time not in {"5min", "15min", "30min", "1h", "4h", "1d"}:
+        raise ValueError("Unsupported Bybit open-interest interval")
+    if start_ms < 0 or end_ms <= start_ms:
+        raise ValueError("Require 0 <= start_ms < end_ms")
+    if not 1 <= limit <= 200:
+        raise ValueError("Bybit open-interest limit must be between 1 and 200")
+    cursor = None
+    seen_cursors: set[str] = set()
+    rows: dict[int, dict[str, Any]] = {}
+    while True:
+        params: dict[str, Any] = {
+            "category": category, "symbol": symbol.upper(),
+            "intervalTime": interval_time, "startTime": start_ms,
+            "endTime": end_ms, "limit": limit,
+        }
+        if cursor:
+            params["cursor"] = cursor
+        result = _bybit_result(
+            _get(fetcher, "https://api.bybit.com", "/v5/market/open-interest", params),
+            "open-interest",
+        )
+        data = result.get("list", [])
+        for item in data:
+            timestamp = int(item["timestamp"])
+            if start_ms <= timestamp < end_ms:
+                rows[timestamp] = {
+                    "venue": "bybit", "market_type": "perpetual",
+                    "instrument": symbol.upper(), "category": category,
+                    "metric": "open_interest", "event_time": utc_iso(timestamp),
+                    "event_time_ms": timestamp, "open_interest": str(item["openInterest"]),
+                    "single_open_interest": str(item.get("singleOpenInterest", "")) or None,
+                    "source_endpoint": "/v5/market/open-interest",
+                    "interval": interval_time,
+                }
+        next_cursor = str(result.get("nextPageCursor") or "")
+        if not next_cursor or not data:
+            break
+        if next_cursor == cursor or next_cursor in seen_cursors:
+            raise RuntimeError("Bybit open-interest pagination cursor repeated")
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+        if pause_seconds:
+            time.sleep(pause_seconds)
+    return [rows[key] for key in sorted(rows)]
+
+
+def collect_binance_open_interest_snapshot(
+    symbol: str, *, fetcher: JsonFetcher = public_json,
+) -> dict[str, Any]:
+    """Collect one current Binance USDⓈ-M open-interest snapshot."""
+    payload = _get(fetcher, "https://fapi.binance.com", "/fapi/v1/openInterest", {
+        "symbol": symbol.upper(),
+    })
+    if not isinstance(payload, Mapping) or "openInterest" not in payload:
+        raise ValueError(f"Unexpected Binance open-interest response: {payload!r}")
+    timestamp = int(payload.get("time", int(time.time() * 1000)))
+    return {
+        "venue": "binance", "market_type": "perpetual",
+        "instrument": symbol.upper(), "metric": "open_interest_snapshot",
+        "event_time": utc_iso(timestamp), "event_time_ms": timestamp,
+        "open_interest": str(payload["openInterest"]),
+        "source_endpoint": "/fapi/v1/openInterest",
+    }
+
+
+def collect_okx_open_interest_snapshot(
+    instrument_id: str, *, fetcher: JsonFetcher = public_json,
+) -> dict[str, Any]:
+    """Collect one current OKX SWAP open-interest snapshot."""
+    payload = _get(fetcher, "https://www.okx.com", "/api/v5/public/open-interest", {
+        "instType": "SWAP", "instId": instrument_id,
+    })
+    if not isinstance(payload, Mapping) or payload.get("code") != "0":
+        raise ValueError(f"Unexpected OKX open-interest response: {payload!r}")
+    data = payload.get("data", [])
+    if not data:
+        raise ValueError("OKX open-interest response contained no data")
+    item = data[0]
+    timestamp = int(item["ts"])
+    return {
+        "venue": "okx", "market_type": "perpetual",
+        "instrument": instrument_id, "metric": "open_interest_snapshot",
+        "event_time": utc_iso(timestamp), "event_time_ms": timestamp,
+        "open_interest": str(item["oi"]),
+        "open_interest_coin": str(item.get("oiCcy", "")) or None,
+        "open_interest_usd": str(item.get("oiUsd", "")) or None,
+        "source_endpoint": "/api/v5/public/open-interest",
+    }
