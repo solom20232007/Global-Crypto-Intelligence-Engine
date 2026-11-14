@@ -103,7 +103,7 @@ def main() -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as output:
         for row in rows:
-            output.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\\n")
+            output.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
     summary = {
         "status": "ok",
         "command": args.command,
