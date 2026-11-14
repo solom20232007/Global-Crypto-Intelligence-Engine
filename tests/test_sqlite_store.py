@@ -1,5 +1,3 @@
-import json
-
 import pytest
 
 from gcie.storage.sqlite_store import SQLiteResearchStore
