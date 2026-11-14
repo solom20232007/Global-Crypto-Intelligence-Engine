@@ -103,7 +103,11 @@ def test_bybit_open_interest_uses_cursor_and_orders_timestamps():
                 "retCode": 0,
                 "result": {
                     "list": [
-                        {"timestamp": "2000", "openInterest": "123.4500", "singleOpenInterest": "61.7250"}
+                        {
+                            "timestamp": "2000",
+                            "openInterest": "123.4500",
+                            "singleOpenInterest": "61.7250",
+                        }
                     ],
                     "nextPageCursor": "cursor-2",
                 },
@@ -111,7 +115,11 @@ def test_bybit_open_interest_uses_cursor_and_orders_timestamps():
         return {
             "retCode": 0,
             "result": {
-                "list": [{"timestamp": "1000", "openInterest": "99.000", "singleOpenInterest": "49.500"}],
+                "list": [{
+                    "timestamp": "1000",
+                    "openInterest": "99.000",
+                    "singleOpenInterest": "49.500",
+                }],
                 "nextPageCursor": "",
             },
         }
