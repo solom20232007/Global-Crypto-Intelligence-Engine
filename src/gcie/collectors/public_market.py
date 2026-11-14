@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -18,7 +18,7 @@ JsonFetcher = Callable[[str], Any]
 
 
 def utc_iso(milliseconds: int) -> str:
-    return datetime.fromtimestamp(milliseconds / 1000, tz=timezone.utc).isoformat()
+    return datetime.fromtimestamp(milliseconds / 1000, tz=UTC).isoformat()
 
 
 def public_json(url: str, *, timeout: int = 20) -> Any:
