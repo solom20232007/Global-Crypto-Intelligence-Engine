@@ -68,7 +68,9 @@ def build_parser() -> argparse.ArgumentParser:
         ("okx-open-interest-snapshot", "Collect current OKX SWAP open interest"),
     ):
         command = subparsers.add_parser(name, help=help_text)
-        command.add_argument("--instrument", required=True, help="Native venue symbol/instrument ID")
+        command.add_argument(
+            "--instrument", required=True, help="Native venue symbol/instrument ID"
+        )
         command.add_argument("--output", required=True, type=Path, help="Output JSONL path")
 
     return parser
