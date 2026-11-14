@@ -5,10 +5,10 @@ in one transaction so a checkpoint can never advance ahead of the data it repres
 """
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
 import json
-from pathlib import Path
 import sqlite3
+from collections.abc import Iterable, Mapping
+from pathlib import Path
 from typing import Any
 
 
