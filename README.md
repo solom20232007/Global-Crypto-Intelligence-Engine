@@ -99,3 +99,56 @@ See [`.env.example`](.env.example). The initial application intentionally requir
 ## Disclaimer
 
 This is a research and decision-support project, not financial advice. Any future signal must be evaluated with fees, slippage, liquidity, and out-of-sample testing.
+
+
+## Public historical market-data backfill (research branch)
+
+The public collectors support Binance spot OHLCV and USDⓈ-M funding, OKX historical candles and perpetual funding, Bybit linear/inverse funding and historical open interest, plus current Binance USDⓈ-M and OKX SWAP open-interest snapshots. They use public market-data endpoints and require no API keys.
+
+Install the project:
+
+```bash
+python -m pip install -e ".[dev]"
+```
+
+Example (replace the timestamps with the exact UTC epoch-millisecond window you want):
+
+```bash
+gcie-backfill binance-spot --instrument ABCUSDT --interval 1m --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/binance_ABCUSDT_1m.jsonl
+gcie-backfill binance-funding --instrument ABCUSDT --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/binance_ABCUSDT_funding.jsonl
+gcie-backfill okx-candles --instrument ABC-USDT --bar 1m --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/okx_ABC-USDT_1m.jsonl
+gcie-backfill okx-funding --instrument ABC-USDT-SWAP --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/okx_ABC-USDT-SWAP_funding.jsonl
+gcie-backfill bybit-funding --instrument ABCUSDT --category linear --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/bybit_ABCUSDT_funding.jsonl
+gcie-backfill bybit-open-interest --instrument ABCUSDT --category linear --interval 1h --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/bybit_ABCUSDT_oi_1h.jsonl
+gcie-backfill binance-open-interest-snapshot --instrument ABCUSDT --output data/raw/binance_ABCUSDT_oi_snapshot.jsonl
+gcie-backfill okx-open-interest-snapshot --instrument ABC-USDT-SWAP --output data/raw/okx_ABC-USDT-SWAP_oi_snapshot.jsonl
+```
+
+Output is JSON Lines. Decimal values remain strings to avoid floating-point precision loss. The end timestamp is exclusive for candle backfills. These commands are per instrument; first discover each venue's historical instrument universe and then schedule bounded batches. Do not launch a nine-month 1-minute backfill for every symbol in one unbounded job.
+
+**Current limitations:** these adapters write normalized JSONL only; they do not yet persist raw response pages or maintain resumable checkpoints. Binance and OKX OI commands are point-in-time snapshots, not historical backfills. Bybit OI is interval-based history (5m through 1d), while Bybit funding history is paginated by timestamp. Wallet transfers, liquidations, borrow rates, order-book depth, and Korean premium inputs remain unimplemented. Provider retention differs by endpoint, so coverage must be measured separately for every venue and metric.
+
+## Local transactional research storage (initial implementation)
+
+The research branch now includes `gcie.storage.SQLiteResearchStore` as a local,
+dependency-free persistence foundation. It creates three tables:
+
+- `raw_pages`: original provider response JSON plus request window/cursor metadata.
+- `observations`: normalized observations keyed by venue, market type, instrument,
+  metric, and event timestamp.
+- `checkpoints`: per-venue/metric/instrument time-partition progress and opaque
+  provider cursor.
+
+Use `commit_page(...)` to write a raw response page, its normalized observations,
+and the associated checkpoint in one SQLite transaction. Replaying a stable
+`page_key` does not duplicate the raw page, and observation keys are upserted.
+SQLite WAL mode is enabled for safer local worker access.
+
+**Important scope:** this is the first storage primitive, not yet wired into the
+Binance/OKX/Bybit collectors or a scheduled workflow. Existing CLI commands still
+write JSONL. The store currently provides local SQLite persistence only; it does
+not yet provide Supabase/PostgreSQL storage, distributed locking, retry/backoff,
+automatic gap detection, or a coverage manifest. Do not start the nine-month
+multi-symbol backfill until collector page capture, resume behavior, and bounded
+batch execution are integrated and tested.
+
