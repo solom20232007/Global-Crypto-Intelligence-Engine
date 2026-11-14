@@ -177,3 +177,26 @@ The final discovery score must be distinct from the Entry confirmation score and
 - Reproducible walk-forward results with fees/slippage and baseline comparisons.
 - Stable performance across more than one time period and liquidity cohort.
 - Research/paper alerts only until prospective performance is independently demonstrated.
+
+
+## 11. Global cross-exchange flow and whale-first research direction
+
+The feature priority is revised: capital flow, wallet/whale behavior, derivatives positioning, funding, borrowing costs, and regional price segmentation are the primary research families. Conventional indicators (RSI, MACD, moving averages) are secondary controls and baselines, not the core discovery engine.
+
+The project will cover South Korean KRW venues (Upbit, Bithumb, Coinone, Korbit, GOPAX); China-linked offshore liquidity venues (OKX, Binance, HTX, Gate.io, KuCoin, Bitget, MEXC); Japanese JPY venues (bitFlyer, Coincheck, bitbank, GMO Coin, Binance Japan); US spot venues (Coinbase, Kraken, Gemini, Bitstamp where relevant); and global derivatives venues (Binance USDⓈ-M/COIN-M, OKX, Bybit, Bitget, Gate.io, MEXC, Hyperliquid, Kraken Futures, Deribit, plus CME as a separate regulated futures market).
+
+Mainland China must not be described as hosting ordinary domestic centralized crypto exchanges: the research universe will include offshore venues serving global/Chinese-language liquidity and explicitly document jurisdiction/product restrictions.
+
+Primary feature families:
+1. Cross-exchange spot aggressive flow and quote-normalized taker imbalance.
+2. Wallet cohorts, whale transfers, exchange inflow/outflow and entity-label confidence.
+3. Open interest, price/OI divergence, funding dispersion, basis, liquidations and leverage crowding.
+4. Margin borrowing/lending rates and financing availability, distinct from perpetual funding.
+5. Kimchi Premium across Korean KRW venues versus synchronized USD reference prices, with USD/KRW FX and USDT/KRW premium controls.
+6. Venue share migration and lead/lag across KRW, JPY, USD and stablecoin markets.
+
+Important feasibility constraint: historical availability is dataset-specific. Binance public OI history is documented as limited to the latest month, while OKX's official historical downloads cover longer histories for selected datasets (including funding and borrowing rates). Therefore, nine months of spot candles does not imply nine months of OI, L2 order books, liquidations or wallet labels. We must report coverage by venue, metric and month, use official archives where available, and start prospective capture immediately for short-retention datasets.
+
+See [Global Exchange & Capital-Flow Source Inventory](global_exchange_capital_flow_source_inventory.md) for the venue matrix, canonical observation contract, source limitations, and implementation sequence.
+
+No feature may infer a wallet's owner, exchange deposit/withdrawal direction, or trade intent without evidence and a confidence label. OI is total outstanding contracts, not a count of short positions. Funding and borrow interest are different costs and must remain separate fields. Kimchi Premium must use synchronized prices and USD/KRW FX, with stale quotes and executable depth explicitly checked.
