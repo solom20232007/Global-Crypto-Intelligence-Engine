@@ -1,6 +1,14 @@
+from urllib.parse import parse_qs, urlparse
+
 from gcie.collectors.public_market import (
-    collect_binance_funding_rates, collect_binance_spot_klines,
-    collect_okx_funding_history, collect_okx_history_candles,
+    collect_binance_funding_rates,
+    collect_binance_open_interest_snapshot,
+    collect_binance_spot_klines,
+    collect_bybit_funding_history,
+    collect_bybit_open_interest_history,
+    collect_okx_funding_history,
+    collect_okx_history_candles,
+    collect_okx_open_interest_snapshot,
 )
 
 
@@ -59,14 +67,6 @@ def test_invalid_ranges_are_rejected():
         raise AssertionError("Invalid time range must fail")
 
 
-from urllib.parse import parse_qs, urlparse
-
-from gcie.collectors.public_market import (
-    collect_binance_open_interest_snapshot,
-    collect_bybit_funding_history,
-    collect_bybit_open_interest_history,
-    collect_okx_open_interest_snapshot,
-)
 
 
 def test_bybit_funding_paginates_backwards_and_preserves_decimal_strings():
