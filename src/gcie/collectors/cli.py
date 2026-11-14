@@ -24,9 +24,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     def common(name: str, help_text: str) -> argparse.ArgumentParser:
         command = subparsers.add_parser(name, help=help_text)
-        command.add_argument("--instrument", required=True, help="Native venue symbol/instrument ID")
-        command.add_argument("--start-ms", required=True, type=int, help="Inclusive UTC epoch milliseconds")
-        command.add_argument("--end-ms", required=True, type=int, help="Exclusive UTC epoch milliseconds")
+        command.add_argument(
+            "--instrument", required=True, help="Native venue symbol/instrument ID"
+        )
+        command.add_argument(
+            "--start-ms", required=True, type=int, help="Inclusive UTC epoch milliseconds"
+        )
+        command.add_argument(
+            "--end-ms", required=True, type=int, help="Exclusive UTC epoch milliseconds"
+        )
         command.add_argument("--output", required=True, type=Path, help="Output JSONL path")
         return command
 
@@ -50,7 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     bybit_oi = common("bybit-open-interest", "Backfill Bybit historical open interest")
     bybit_oi.add_argument("--category", choices=("linear", "inverse"), default="linear")
-    bybit_oi.add_argument("--interval", choices=("5min", "15min", "30min", "1h", "4h", "1d"), default="1h")
+    bybit_oi.add_argument(
+        "--interval",
+        choices=("5min", "15min", "30min", "1h", "4h", "1d"),
+        default="1h",
+    )
     bybit_oi.add_argument("--limit", type=int, default=200)
 
     for name, help_text in (
