@@ -99,3 +99,27 @@ See [`.env.example`](.env.example). The initial application intentionally requir
 ## Disclaimer
 
 This is a research and decision-support project, not financial advice. Any future signal must be evaluated with fees, slippage, liquidity, and out-of-sample testing.
+
+
+## Public historical market-data backfill (research branch)
+
+The first public collectors support Binance spot OHLCV, Binance USDⓈ-M funding history, OKX historical candles, and OKX perpetual funding history. They use public endpoints and require no API keys.
+
+Install the project:
+
+```bash
+python -m pip install -e ".[dev]"
+```
+
+Example (replace the timestamps with the exact UTC epoch-millisecond window you want):
+
+```bash
+gcie-backfill binance-spot --instrument ABCUSDT --interval 1m --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/binance_ABCUSDT_1m.jsonl
+gcie-backfill binance-funding --instrument ABCUSDT --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/binance_ABCUSDT_funding.jsonl
+gcie-backfill okx-candles --instrument ABC-USDT --bar 1m --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/okx_ABC-USDT_1m.jsonl
+gcie-backfill okx-funding --instrument ABC-USDT-SWAP --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/okx_ABC-USDT-SWAP_funding.jsonl
+```
+
+Output is JSON Lines. Decimal values remain strings to avoid floating-point precision loss. The end timestamp is exclusive for candle backfills. These commands are per instrument; first discover each venue's historical instrument universe and then schedule bounded batches. Do not launch a nine-month 1-minute backfill for every symbol in one unbounded job.
+
+**Current limitations:** these first adapters do not yet persist raw response pages, maintain resumable checkpoints, collect OI snapshots, wallet transfers, liquidations, borrow rates, order-book depth, or Korean premium inputs. Funding history and OI history have provider-specific retention limits. A successful candle backfill must never be interpreted as proof that derivatives or wallet history is equally complete.
