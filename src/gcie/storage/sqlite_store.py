@@ -6,12 +6,14 @@ in one transaction so a checkpoint can never advance ahead of the data it repres
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
 import json
-from pathlib import Path
 import sqlite3
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
+from datetime import date, datetime
+from decimal import Decimal
+from pathlib import Path
 from typing import Any
-
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -54,6 +56,18 @@ ON observations (venue, metric, instrument, event_time_ms);
 """
 
 
+def _json_default(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=_json_default)
+
+
 class SQLiteResearchStore:
     """Small local store; safe to reopen between bounded collector runs."""
 
@@ -62,15 +76,29 @@ class SQLiteResearchStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30)
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+    @contextmanager
+    def _connect(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
+        """Open a connection, run one explicit transaction, and always close it."""
+        connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+        try:
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+            try:
+                yield connection
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+            connection.execute("COMMIT")
+        finally:
+            connection.close()
 
     def _initialize(self) -> None:
-        with self._connect() as connection:
+        connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+        try:
+            connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(SCHEMA)
+        finally:
+            connection.close()
 
     def commit_page(
         self,
@@ -99,9 +127,27 @@ class SQLiteResearchStore:
         if status not in {"pending", "running", "complete", "failed"}:
             raise ValueError("Unsupported checkpoint status")
 
-        rows = list(observations)
-        raw_json = json.dumps(raw_payload, ensure_ascii=False, sort_keys=True)
-        with self._connect() as connection:
+        rows = [dict(row) for row in observations]
+        raw_json = _dumps(raw_payload)
+        prepared = []
+        for row in rows:
+            # venue/metric/instrument default to the page's values; a mismatch is a bug.
+            page_identity = (("venue", venue), ("metric", metric), ("instrument", instrument))
+            for key, page_value in page_identity:
+                row.setdefault(key, page_value)
+                if str(row[key]) != page_value:
+                    raise ValueError(
+                        f"Observation {key}={row[key]!r} does not match "
+                        f"page {key}={page_value!r}"
+                    )
+            if "market_type" not in row or "event_time_ms" not in row:
+                raise ValueError("Each observation needs market_type and event_time_ms")
+            identity = (
+                venue, str(row["market_type"]), instrument, metric, int(row["event_time_ms"]),
+            )
+            prepared.append((*identity, _dumps(row), page_key))
+
+        with self._connect(write=True) as connection:
             existing = connection.execute(
                 "SELECT response_json FROM raw_pages WHERE page_key=?",
                 (page_key,),
@@ -119,23 +165,16 @@ class SQLiteResearchStore:
                     partition_end_ms, request_cursor, next_cursor, raw_json,
                 ),
             )
-            for row in rows:
-                event_time_ms = int(row["event_time_ms"])
-                identity = (
-                    str(row["venue"]), str(row["market_type"]),
-                    str(row["instrument"]), str(row["metric"]), event_time_ms,
-                )
-                connection.execute(
-                    """INSERT INTO observations (
-                        venue, market_type, instrument, metric, event_time_ms,
-                        payload_json, source_page_key
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(venue, market_type, instrument, metric, event_time_ms)
-                    DO UPDATE SET payload_json=excluded.payload_json,
-                                  source_page_key=excluded.source_page_key""",
-                    (*identity, json.dumps(dict(row), ensure_ascii=False, sort_keys=True),
-                     page_key),
-                )
+            connection.executemany(
+                """INSERT INTO observations (
+                    venue, market_type, instrument, metric, event_time_ms,
+                    payload_json, source_page_key
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(venue, market_type, instrument, metric, event_time_ms)
+                DO UPDATE SET payload_json=excluded.payload_json,
+                              source_page_key=excluded.source_page_key""",
+                prepared,
+            )
             connection.execute(
                 """INSERT INTO checkpoints (
                     venue, metric, instrument, partition_start_ms, partition_end_ms,
@@ -144,7 +183,8 @@ class SQLiteResearchStore:
                 ON CONFLICT(venue, metric, instrument, partition_start_ms, partition_end_ms)
                 DO UPDATE SET next_cursor=excluded.next_cursor,
                               status=excluded.status,
-                              updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')""",
+                              updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE checkpoints.status != 'complete' OR excluded.status = 'complete'""",
                 (
                     venue, metric, instrument, partition_start_ms,
                     partition_end_ms, next_cursor, status,

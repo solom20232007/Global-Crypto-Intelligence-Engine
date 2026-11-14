@@ -152,3 +152,27 @@ automatic gap detection, or a coverage manifest. Do not start the nine-month
 multi-symbol backfill until collector page capture, resume behavior, and bounded
 batch execution are integrated and tested.
 
+## Historical backfills
+
+`gcie-backfill` collects public market data for a `[start, end)` range in UTC epoch
+milliseconds. With `--db`, each partition is committed to SQLite with its raw provider
+responses and a checkpoint, so an interrupted run can be repeated with the same command:
+completed partitions are skipped and collection resumes where it stopped.
+
+```bash
+# Nine months of Binance 1m candles, resumable
+gcie-backfill binance-spot --instrument BTCUSDT --interval 1m \
+  --start-ms 1767225600000 --end-ms 1790812800000 --db data/raw/research.sqlite
+
+# Same, also exporting the rows fetched in this run to JSONL
+gcie-backfill okx-funding --instrument BTC-USDT-SWAP \
+  --start-ms 1767225600000 --end-ms 1790812800000 \
+  --db data/raw/research.sqlite --output data/processed/okx_funding.jsonl
+```
+
+- Requests retry HTTP 429/5xx and network errors with exponential backoff and honour
+  `Retry-After`. HTTP 418 (Binance IP ban) stops the run immediately.
+- Partitions that reach into the future are stored as `running` and refreshed next run.
+- `--chunk-ms` changes the partition size; defaults are 1 day for candles, 7 days for
+  open interest, and 30 days for funding.
+
