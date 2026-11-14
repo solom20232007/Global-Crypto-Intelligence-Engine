@@ -1,4 +1,4 @@
-from gcie.venues import VENUES, VENUE_BY_ID, get_venues
+from gcie.venues import VENUE_BY_ID, VENUES, get_venues
 
 
 def test_registry_covers_required_regions():
