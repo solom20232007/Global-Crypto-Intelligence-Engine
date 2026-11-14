@@ -3,6 +3,7 @@
 Raw provider payloads, normalized observations, and progress checkpoints are committed
 in one transaction so a checkpoint can never advance ahead of the data it represents.
 """
+
 from __future__ import annotations
 
 import json
