@@ -11,26 +11,115 @@ import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 JsonFetcher = Callable[[str], Any]
+
+RETRYABLE_HTTP_STATUS = frozenset({429, 500, 502, 503, 504})
+MAX_RETRY_AFTER_SECONDS = 300.0
+# Rate-limit errors some venues return inside an HTTP 200 body.
+OKX_RATE_LIMIT_CODES = frozenset({"50011", "50061"})
+BYBIT_RATE_LIMIT_CODES = frozenset({10006, 10018})
+
+
+class PublicApiError(RuntimeError):
+    """A public endpoint failed permanently or after all retries."""
+
+
+def _retry_after_seconds(headers: Any) -> float | None:
+    value = headers.get("Retry-After") if headers is not None else None
+    try:
+        return max(0.0, float(value)) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def utc_iso(milliseconds: int) -> str:
     return datetime.fromtimestamp(milliseconds / 1000, tz=UTC).isoformat()
 
 
-def public_json(url: str, *, timeout: int = 20) -> Any:
-    """Fetch a public JSON endpoint with a descriptive user agent."""
+def public_json(
+    url: str,
+    *,
+    timeout: float = 20,
+    max_attempts: int = 5,
+    backoff_seconds: float = 1.0,
+    max_backoff_seconds: float = 60.0,
+    sleep: Callable[[float], None] = time.sleep,
+    opener: Callable[..., Any] = urlopen,
+) -> Any:
+    """Fetch a public JSON endpoint, retrying rate limits and transient failures.
+
+    HTTP 429 and 5xx responses, timeouts, and connection errors are retried with
+    exponential backoff, honouring Retry-After when the venue sends it. HTTP 418
+    (Binance IP ban after ignored 429s) and other 4xx responses fail immediately.
+    """
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
     request = Request(url, headers={"User-Agent": "GCIE-research/0.1"})
-    with urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
+    delay = backoff_seconds
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with opener(request, timeout=timeout) as response:
+                body = response.read()
+        except HTTPError as exc:
+            if exc.code == 418:
+                raise PublicApiError(
+                    f"HTTP 418 from {url}: the venue has temporarily banned this IP. "
+                    "Stop all collectors and wait before retrying."
+                ) from exc
+            if exc.code not in RETRYABLE_HTTP_STATUS or attempt == max_attempts:
+                detail = exc.read()[:500].decode("utf-8", "replace") if exc.fp else ""
+                raise PublicApiError(f"HTTP {exc.code} from {url}: {detail}") from exc
+            retry_after = _retry_after_seconds(exc.headers)
+            if retry_after is not None and retry_after > MAX_RETRY_AFTER_SECONDS:
+                raise PublicApiError(
+                    f"HTTP {exc.code} from {url}: Retry-After {retry_after:.0f}s is too long"
+                ) from exc
+            wait = retry_after if retry_after is not None else min(delay, max_backoff_seconds)
+        except (URLError, TimeoutError, ConnectionError) as exc:
+            if attempt == max_attempts:
+                raise PublicApiError(
+                    f"Network error from {url} after {attempt} attempts: {exc}"
+                ) from exc
+            wait = min(delay, max_backoff_seconds)
+        else:
+            return json.loads(body.decode("utf-8"))
+        sleep(wait)
+        delay *= 2
+    raise AssertionError("unreachable")
 
 
-def _get(fetcher: JsonFetcher, base: str, path: str, params: Mapping[str, Any]) -> Any:
+def _is_in_body_rate_limit(payload: Any) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    return (
+        str(payload.get("code")) in OKX_RATE_LIMIT_CODES
+        or payload.get("retCode") in BYBIT_RATE_LIMIT_CODES
+    )
+
+
+def _get(
+    fetcher: JsonFetcher,
+    base: str,
+    path: str,
+    params: Mapping[str, Any],
+    *,
+    rate_limit_attempts: int = 5,
+    sleep: Callable[[float], None] | None = None,
+) -> Any:
+    wait = sleep or time.sleep
     query = urlencode({key: value for key, value in params.items() if value is not None})
-    return fetcher(f"{base}{path}?{query}")
+    url = f"{base}{path}?{query}"
+    payload = fetcher(url)
+    for attempt in range(1, rate_limit_attempts):
+        if not _is_in_body_rate_limit(payload):
+            break
+        wait(min(2.0**attempt, 30.0))
+        payload = fetcher(url)
+    return payload
 
 
 def _interval_ms(interval: str) -> int:
@@ -86,9 +175,9 @@ def collect_binance_spot_klines(
         if next_cursor <= cursor:
             raise RuntimeError("Binance kline pagination did not advance")
         cursor = next_cursor
-        if len(payload) < limit:
-            break
-        if pause_seconds:
+        # A short page is not proof of the end of history; only an empty page or
+        # reaching end_ms is. Short pages occur when a venue caps limit silently.
+        if pause_seconds and cursor < end_ms:
             time.sleep(pause_seconds)
     return [rows[key] for key in sorted(rows)]
 
@@ -97,16 +186,19 @@ def collect_binance_funding_rates(
     symbol: str, start_ms: int, end_ms: int, *,
     limit: int = 1000, fetcher: JsonFetcher = public_json, pause_seconds: float = 0.05,
 ) -> list[dict[str, Any]]:
-    """Collect USDⓈ-M funding history with timestamp pagination."""
+    """Collect USDⓈ-M funding history with timestamp pagination.
+
+    The range is [start_ms, end_ms): end_ms is exclusive, like every other collector.
+    """
     if start_ms < 0 or end_ms <= start_ms:
         raise ValueError("Require 0 <= start_ms < end_ms")
     if not 1 <= limit <= 1000:
         raise ValueError("Binance funding limit must be between 1 and 1000")
     cursor = start_ms
     rows: dict[int, dict[str, Any]] = {}
-    while cursor <= end_ms:
+    while cursor < end_ms:
         payload = _get(fetcher, "https://fapi.binance.com", "/fapi/v1/fundingRate", {
-            "symbol": symbol.upper(), "startTime": cursor, "endTime": end_ms, "limit": limit,
+            "symbol": symbol.upper(), "startTime": cursor, "endTime": end_ms - 1, "limit": limit,
         })
         if not isinstance(payload, list):
             raise ValueError("Unexpected Binance funding response")
@@ -115,7 +207,7 @@ def collect_binance_funding_rates(
         last_time = None
         for item in payload:
             timestamp = int(item["fundingTime"])
-            if start_ms <= timestamp <= end_ms:
+            if start_ms <= timestamp < end_ms:
                 rows[timestamp] = {
                     "venue": "binance", "market_type": "perpetual",
                     "instrument": symbol.upper(), "metric": "funding_rate",
@@ -127,10 +219,8 @@ def collect_binance_funding_rates(
             last_time = timestamp if last_time is None else max(last_time, timestamp)
         if last_time is None or last_time < cursor:
             raise RuntimeError("Binance funding pagination did not advance")
-        if len(payload) < limit:
-            break
         cursor = last_time + 1
-        if pause_seconds:
+        if pause_seconds and cursor < end_ms:
             time.sleep(pause_seconds)
     return [rows[key] for key in sorted(rows)]
 
@@ -176,9 +266,7 @@ def collect_okx_history_candles(
         if oldest >= cursor:
             raise RuntimeError("OKX candle pagination did not move backwards")
         cursor = oldest
-        if len(data) < limit:
-            break
-        if pause_seconds:
+        if pause_seconds and cursor > start_ms:
             time.sleep(pause_seconds)
     return [rows[key] for key in sorted(rows)]
 
@@ -220,9 +308,7 @@ def collect_okx_funding_history(
         if oldest >= cursor:
             raise RuntimeError("OKX funding pagination did not move backwards")
         cursor = oldest
-        if len(data) < limit:
-            break
-        if pause_seconds:
+        if pause_seconds and cursor > start_ms:
             time.sleep(pause_seconds)
     return [rows[key] for key in sorted(rows)]
 
@@ -242,8 +328,8 @@ def collect_bybit_funding_history(
 ) -> list[dict[str, Any]]:
     """Collect Bybit V5 linear/inverse funding history in bounded time pages.
 
-    Bybit requires startTime and endTime together. The API returns at most
-    200 records per request, so a full page is continued from its oldest row.
+    Bybit requires startTime and endTime together. Pages are continued from the
+    oldest returned row until an empty page or start_ms is reached.
     """
     if category not in {"linear", "inverse"}:
         raise ValueError("Bybit category must be 'linear' or 'inverse'")
@@ -251,9 +337,9 @@ def collect_bybit_funding_history(
         raise ValueError("Require 0 <= start_ms < end_ms")
     if not 1 <= limit <= 200:
         raise ValueError("Bybit funding limit must be between 1 and 200")
-    cursor_end = end_ms
+    cursor_end = end_ms - 1  # Bybit endTime is inclusive; our end_ms is exclusive.
     rows: dict[int, dict[str, Any]] = {}
-    while cursor_end > start_ms:
+    while cursor_end >= start_ms:
         payload = _get(fetcher, "https://api.bybit.com", "/v5/market/funding/history", {
             "category": category, "symbol": symbol.upper(),
             "startTime": start_ms, "endTime": cursor_end, "limit": limit,
@@ -275,12 +361,10 @@ def collect_bybit_funding_history(
                     "source_endpoint": "/v5/market/funding/history",
                 }
         oldest = min(timestamps)
-        if oldest >= cursor_end:
+        if oldest > cursor_end:
             raise RuntimeError("Bybit funding pagination did not move backwards")
-        if len(data) < limit:
-            break
         cursor_end = oldest - 1
-        if pause_seconds:
+        if pause_seconds and cursor_end >= start_ms:
             time.sleep(pause_seconds)
     return [rows[key] for key in sorted(rows)]
 
