@@ -12,7 +12,7 @@ class Settings:
     log_level: str = "INFO"
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         environment = os.getenv("GCIE_ENV", "development").strip().lower()
         log_level = os.getenv("GCIE_LOG_LEVEL", "INFO").strip().upper()
         allowed_environments = {"development", "test", "staging", "production"}
