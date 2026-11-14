@@ -71,3 +71,22 @@ def test_invalid_partition_is_rejected(tmp_path):
             instrument="ABCUSDT", raw_payload={}, observations=[],
             partition_start_ms=10, partition_end_ms=10,
         )
+
+def test_reusing_page_key_with_different_raw_payload_fails(tmp_path):
+    store = SQLiteResearchStore(tmp_path / "research.sqlite")
+    args = {
+        "page_key": "page-1",
+        "venue": "binance",
+        "metric": "ohlcv",
+        "instrument": "ABCUSDT",
+        "raw_payload": {"page": 1},
+        "observations": [sample_row()],
+        "partition_start_ms": 0,
+        "partition_end_ms": 2000,
+    }
+    store.commit_page(**args)
+    args["raw_payload"] = {"page": "different"}
+    with pytest.raises(ValueError, match="different raw payload"):
+        store.commit_page(**args)
+    assert store.counts()["raw_pages"] == 1
+
