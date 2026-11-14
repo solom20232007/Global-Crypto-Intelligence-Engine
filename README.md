@@ -127,3 +127,28 @@ gcie-backfill okx-open-interest-snapshot --instrument ABC-USDT-SWAP --output dat
 Output is JSON Lines. Decimal values remain strings to avoid floating-point precision loss. The end timestamp is exclusive for candle backfills. These commands are per instrument; first discover each venue's historical instrument universe and then schedule bounded batches. Do not launch a nine-month 1-minute backfill for every symbol in one unbounded job.
 
 **Current limitations:** these adapters write normalized JSONL only; they do not yet persist raw response pages or maintain resumable checkpoints. Binance and OKX OI commands are point-in-time snapshots, not historical backfills. Bybit OI is interval-based history (5m through 1d), while Bybit funding history is paginated by timestamp. Wallet transfers, liquidations, borrow rates, order-book depth, and Korean premium inputs remain unimplemented. Provider retention differs by endpoint, so coverage must be measured separately for every venue and metric.
+
+## Local transactional research storage (initial implementation)
+
+The research branch now includes `gcie.storage.SQLiteResearchStore` as a local,
+dependency-free persistence foundation. It creates three tables:
+
+- `raw_pages`: original provider response JSON plus request window/cursor metadata.
+- `observations`: normalized observations keyed by venue, market type, instrument,
+  metric, and event timestamp.
+- `checkpoints`: per-venue/metric/instrument time-partition progress and opaque
+  provider cursor.
+
+Use `commit_page(...)` to write a raw response page, its normalized observations,
+and the associated checkpoint in one SQLite transaction. Replaying a stable
+`page_key` does not duplicate the raw page, and observation keys are upserted.
+SQLite WAL mode is enabled for safer local worker access.
+
+**Important scope:** this is the first storage primitive, not yet wired into the
+Binance/OKX/Bybit collectors or a scheduled workflow. Existing CLI commands still
+write JSONL. The store currently provides local SQLite persistence only; it does
+not yet provide Supabase/PostgreSQL storage, distributed locking, retry/backoff,
+automatic gap detection, or a coverage manifest. Do not start the nine-month
+multi-symbol backfill until collector page capture, resume behavior, and bounded
+batch execution are integrated and tested.
+
