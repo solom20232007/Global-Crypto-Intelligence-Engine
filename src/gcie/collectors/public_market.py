@@ -122,6 +122,34 @@ def _get(
     return payload
 
 
+def okx_market_type(instrument_id: str) -> str:
+    """Classify an OKX instId by its native format.
+
+    SPOT/MARGIN ``BTC-USDT``; SWAP ``BTC-USDT-SWAP``; FUTURES ``BTC-USD-261225``;
+    OPTION ``BTC-USD-261225-60000-C``.
+    """
+    parts = instrument_id.upper().split("-")
+    if len(parts) == 3 and parts[2] == "SWAP":
+        return "perpetual"
+    if len(parts) == 3 and len(parts[2]) == 6 and parts[2].isdigit():
+        return "dated_future"
+    if (
+        len(parts) == 5 and len(parts[2]) == 6 and parts[2].isdigit()
+        and parts[4] in {"C", "P"}
+    ):
+        return "option"
+    if len(parts) == 2 and all(parts):
+        return "spot"
+    raise ValueError(f"Unrecognised OKX instrument ID: {instrument_id!r}")
+
+
+OKX_INST_TYPE = {"perpetual": "SWAP", "dated_future": "FUTURES", "option": "OPTION"}
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
 def _interval_ms(interval: str) -> int:
     units = {"m": 60_000, "h": 3_600_000, "d": 86_400_000, "w": 604_800_000}
     try:
@@ -134,13 +162,20 @@ def _interval_ms(interval: str) -> int:
 def collect_binance_spot_klines(
     symbol: str, interval: str, start_ms: int, end_ms: int, *,
     limit: int = 1000, fetcher: JsonFetcher = public_json, pause_seconds: float = 0.05,
+    include_unconfirmed: bool = False, now_ms: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Backfill Binance spot klines in chronological, non-overlapping pages."""
+    """Backfill Binance spot klines in chronological, non-overlapping pages.
+
+    Binance returns the still-open candle with provisional values. A candle is
+    confirmed once its close time has passed; unconfirmed candles are dropped
+    unless include_unconfirmed is set, in which case they carry confirmed=False.
+    """
     if start_ms < 0 or end_ms <= start_ms:
         raise ValueError("Require 0 <= start_ms < end_ms")
     if not 1 <= limit <= 1000:
         raise ValueError("Binance spot kline limit must be between 1 and 1000")
     step = _interval_ms(interval)
+    now = _now_ms() if now_ms is None else now_ms
     cursor = start_ms
     rows: dict[int, dict[str, Any]] = {}
     while cursor < end_ms:
@@ -157,9 +192,10 @@ def collect_binance_spot_klines(
             if len(item) < 11:
                 raise ValueError("Malformed Binance kline row")
             opened = int(item[0])
-            if start_ms <= opened < end_ms:
+            confirmed = int(item[6]) < now
+            if start_ms <= opened < end_ms and (confirmed or include_unconfirmed):
                 rows[opened] = {
-                    "venue": "binance", "market_type": "spot",
+                    "venue": "binance", "market_type": "spot", "confirmed": confirmed,
                     "instrument": symbol.upper(), "metric": "ohlcv",
                     "event_time": utc_iso(opened), "event_time_ms": opened,
                     "open": str(item[1]), "high": str(item[2]), "low": str(item[3]),
@@ -228,12 +264,18 @@ def collect_binance_funding_rates(
 def collect_okx_history_candles(
     instrument_id: str, bar: str, start_ms: int, end_ms: int, *,
     limit: int = 100, fetcher: JsonFetcher = public_json, pause_seconds: float = 0.12,
+    include_unconfirmed: bool = False,
 ) -> list[dict[str, Any]]:
-    """Backfill OKX history candles backwards from end_ms using its older-than cursor."""
+    """Backfill OKX history candles backwards from end_ms using its older-than cursor.
+
+    Candles with OKX ``confirm`` = "0" are still open and are dropped unless
+    include_unconfirmed is set.
+    """
     if start_ms < 0 or end_ms <= start_ms:
         raise ValueError("Require 0 <= start_ms < end_ms")
     if not 1 <= limit <= 300:
         raise ValueError("OKX history-candles limit must be between 1 and 300")
+    market_type = okx_market_type(instrument_id)
     cursor = end_ms
     rows: dict[int, dict[str, Any]] = {}
     while cursor > start_ms:
@@ -251,15 +293,15 @@ def collect_okx_history_candles(
                 raise ValueError("Malformed OKX candle row")
             timestamp = int(item[0])
             timestamps.append(timestamp)
-            if start_ms <= timestamp < end_ms:
+            confirmed = str(item[8]) == "1"
+            if start_ms <= timestamp < end_ms and (confirmed or include_unconfirmed):
                 rows[timestamp] = {
-                    "venue": "okx",
-                    "market_type": "perpetual" if instrument_id.endswith("-SWAP") else "spot",
+                    "venue": "okx", "market_type": market_type,
                     "instrument": instrument_id, "metric": "ohlcv",
                     "event_time": utc_iso(timestamp), "event_time_ms": timestamp,
                     "open": str(item[1]), "high": str(item[2]), "low": str(item[3]),
                     "close": str(item[4]), "volume_base": str(item[5]),
-                    "volume_quote": str(item[7]), "confirmed": str(item[8]) == "1",
+                    "volume_quote": str(item[7]), "confirmed": confirmed,
                     "source_endpoint": "/api/v5/market/history-candles",
                 }
         oldest = min(timestamps)
@@ -444,9 +486,12 @@ def collect_binance_open_interest_snapshot(
 def collect_okx_open_interest_snapshot(
     instrument_id: str, *, fetcher: JsonFetcher = public_json,
 ) -> dict[str, Any]:
-    """Collect one current OKX SWAP open-interest snapshot."""
+    """Collect one current OKX open-interest snapshot for a SWAP, FUTURES or OPTION."""
+    market_type = okx_market_type(instrument_id)
+    if market_type not in OKX_INST_TYPE:
+        raise ValueError(f"OKX open interest needs a derivatives instrument: {instrument_id!r}")
     payload = _get(fetcher, "https://www.okx.com", "/api/v5/public/open-interest", {
-        "instType": "SWAP", "instId": instrument_id,
+        "instType": OKX_INST_TYPE[market_type], "instId": instrument_id,
     })
     if not isinstance(payload, Mapping) or payload.get("code") != "0":
         raise ValueError(f"Unexpected OKX open-interest response: {payload!r}")
@@ -456,7 +501,7 @@ def collect_okx_open_interest_snapshot(
     item = data[0]
     timestamp = int(item["ts"])
     return {
-        "venue": "okx", "market_type": "perpetual",
+        "venue": "okx", "market_type": market_type,
         "instrument": instrument_id, "metric": "open_interest_snapshot",
         "event_time": utc_iso(timestamp), "event_time_ms": timestamp,
         "open_interest": str(item["oi"]),

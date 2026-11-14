@@ -32,7 +32,9 @@ from gcie.storage.sqlite_store import SQLiteResearchStore
 
 DAY_MS = 86_400_000
 
-RangeCollector = Callable[[argparse.Namespace, int, int, JsonFetcher], list[dict[str, Any]]]
+RangeCollector = Callable[
+    [argparse.Namespace, int, int, JsonFetcher, int], list[dict[str, Any]]
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,15 +49,15 @@ RANGE_COMMANDS: dict[str, RangeCommand] = {
     "binance-spot": RangeCommand(
         "binance",
         lambda a: f"ohlcv_{a.interval}",
-        lambda a, s, e, f: collect_binance_spot_klines(
-            a.instrument, a.interval, s, e, limit=a.limit, fetcher=f
+        lambda a, s, e, f, now: collect_binance_spot_klines(
+            a.instrument, a.interval, s, e, limit=a.limit, fetcher=f, now_ms=now
         ),
         DAY_MS,
     ),
     "binance-funding": RangeCommand(
         "binance",
         lambda a: "funding_rate",
-        lambda a, s, e, f: collect_binance_funding_rates(
+        lambda a, s, e, f, _now: collect_binance_funding_rates(
             a.instrument, s, e, limit=a.limit, fetcher=f
         ),
         30 * DAY_MS,
@@ -63,7 +65,7 @@ RANGE_COMMANDS: dict[str, RangeCommand] = {
     "okx-candles": RangeCommand(
         "okx",
         lambda a: f"ohlcv_{a.bar}",
-        lambda a, s, e, f: collect_okx_history_candles(
+        lambda a, s, e, f, _now: collect_okx_history_candles(
             a.instrument, a.bar, s, e, limit=a.limit, fetcher=f
         ),
         DAY_MS,
@@ -71,7 +73,7 @@ RANGE_COMMANDS: dict[str, RangeCommand] = {
     "okx-funding": RangeCommand(
         "okx",
         lambda a: "funding_rate",
-        lambda a, s, e, f: collect_okx_funding_history(
+        lambda a, s, e, f, _now: collect_okx_funding_history(
             a.instrument, s, e, limit=a.limit, fetcher=f
         ),
         30 * DAY_MS,
@@ -79,7 +81,7 @@ RANGE_COMMANDS: dict[str, RangeCommand] = {
     "bybit-funding": RangeCommand(
         "bybit",
         lambda a: f"funding_rate_{a.category}",
-        lambda a, s, e, f: collect_bybit_funding_history(
+        lambda a, s, e, f, _now: collect_bybit_funding_history(
             a.category, a.instrument, s, e, limit=a.limit, fetcher=f
         ),
         30 * DAY_MS,
@@ -87,7 +89,7 @@ RANGE_COMMANDS: dict[str, RangeCommand] = {
     "bybit-open-interest": RangeCommand(
         "bybit",
         lambda a: f"open_interest_{a.category}_{a.interval}",
-        lambda a, s, e, f: collect_bybit_open_interest_history(
+        lambda a, s, e, f, _now: collect_bybit_open_interest_history(
             a.category, a.instrument, a.interval, s, e, limit=a.limit, fetcher=f
         ),
         7 * DAY_MS,
@@ -174,7 +176,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     for name, help_text in (
         ("binance-open-interest-snapshot", "Collect current Binance USDⓈ-M open interest"),
-        ("okx-open-interest-snapshot", "Collect current OKX SWAP open interest"),
+        ("okx-open-interest-snapshot", "Collect current OKX SWAP/FUTURES/OPTION open interest"),
     ):
         command = subparsers.add_parser(name, help=help_text)
         command.add_argument(
@@ -208,7 +210,9 @@ def collect(args: argparse.Namespace, fetcher: JsonFetcher = public_json) -> lis
     if args.command in SNAPSHOT_COMMANDS:
         return [SNAPSHOT_COMMANDS[args.command](args.instrument, fetcher)]
     if args.command in RANGE_COMMANDS:
-        return RANGE_COMMANDS[args.command].collect(args, args.start_ms, args.end_ms, fetcher)
+        return RANGE_COMMANDS[args.command].collect(
+            args, args.start_ms, args.end_ms, fetcher, int(time.time() * 1000)
+        )
     raise ValueError(f"Unsupported command: {args.command}")
 
 
@@ -251,7 +255,7 @@ def run_range_command(
                     continue
 
             recorder = RecordingFetcher(fetcher)
-            rows = spec.collect(args, start, end, recorder)
+            rows = spec.collect(args, start, end, recorder, now)
             # A partition reaching into the future may still change (open candle,
             # upcoming funding), so it stays 'running' and is fetched again next run.
             complete = end <= now

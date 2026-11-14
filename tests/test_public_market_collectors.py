@@ -1,5 +1,7 @@
 from urllib.parse import parse_qs, urlparse
 
+import pytest
+
 from gcie.collectors.public_market import (
     collect_binance_funding_rates,
     collect_binance_open_interest_snapshot,
@@ -9,6 +11,7 @@ from gcie.collectors.public_market import (
     collect_okx_funding_history,
     collect_okx_history_candles,
     collect_okx_open_interest_snapshot,
+    okx_market_type,
 )
 
 
@@ -267,3 +270,82 @@ def test_in_body_rate_limit_is_retried(monkeypatch):
         "ABC-USDT-SWAP", 0, 2000, fetcher=lambda _url: next(responses), pause_seconds=0,
     )
     assert [row["event_time_ms"] for row in rows] == [1000]
+
+
+@pytest.mark.parametrize(("inst_id", "expected"), [
+    ("BTC-USDT", "spot"),
+    ("BTC-USDT-SWAP", "perpetual"),
+    ("BTC-USD-261225", "dated_future"),
+    ("BTC-USD-261225-60000-C", "option"),
+    ("ETH-USD-261225-3000-P", "option"),
+])
+def test_okx_market_type_is_inferred_from_instrument_id(inst_id, expected):
+    assert okx_market_type(inst_id) == expected
+
+
+@pytest.mark.parametrize("bad", ["BTC", "BTC-USDT-PERP", "BTC-USD-2612", ""])
+def test_okx_unknown_instrument_format_is_rejected(bad):
+    with pytest.raises(ValueError, match="Unrecognised OKX"):
+        okx_market_type(bad)
+
+
+def test_okx_dated_future_candles_are_not_labelled_spot():
+    history = [["60000", "1", "1", "1", "1", "1", "1", "1", "1"]]
+    rows = collect_okx_history_candles(
+        "BTC-USD-261225", "1m", 0, 120_000, fetcher=okx_like(history, 0), pause_seconds=0,
+    )
+    assert rows[0]["market_type"] == "dated_future"
+
+
+def test_okx_open_candle_is_dropped_by_default():
+    history = [
+        ["0", "1", "1", "1", "1", "1", "1", "1", "1"],
+        ["60000", "1", "1", "1", "1", "1", "1", "1", "0"],  # still open
+    ]
+    rows = collect_okx_history_candles(
+        "BTC-USDT", "1m", 0, 120_000, fetcher=okx_like(history, 0), pause_seconds=0,
+    )
+    assert [row["event_time_ms"] for row in rows] == [0]
+    rows = collect_okx_history_candles(
+        "BTC-USDT", "1m", 0, 120_000, fetcher=okx_like(history, 0), pause_seconds=0,
+        include_unconfirmed=True,
+    )
+    assert [row["confirmed"] for row in rows] == [True, False]
+
+
+def test_binance_open_candle_is_dropped_by_default():
+    payload = [
+        [0, "1", "2", "0.5", "1.2", "8", 59_999, "10", 5, "4", "5", "0"],
+        [60_000, "1", "2", "0.5", "1.5", "10", 119_999, "15", 7, "6", "9", "0"],
+    ]
+
+    def fetch(url):
+        start = int(parse_qs(urlparse(url).query)["startTime"][0])
+        return [row for row in payload if row[0] >= start]
+
+    now = 90_000  # second candle closes at 119_999, so it is still open
+    rows = collect_binance_spot_klines(
+        "ABCUSDT", "1m", 0, 120_000, fetcher=fetch, pause_seconds=0, now_ms=now,
+    )
+    assert [row["event_time_ms"] for row in rows] == [0]
+    assert rows[0]["confirmed"] is True
+    rows = collect_binance_spot_klines(
+        "ABCUSDT", "1m", 0, 120_000, fetcher=fetch, pause_seconds=0, now_ms=now,
+        include_unconfirmed=True,
+    )
+    assert [row["confirmed"] for row in rows] == [True, False]
+
+
+def test_okx_open_interest_snapshot_supports_futures():
+    calls = []
+
+    def fetch(url):
+        calls.append(parse_qs(urlparse(url).query))
+        return {"code": "0", "data": [{"oi": "5", "ts": "1000"}]}
+
+    row = collect_okx_open_interest_snapshot("BTC-USD-261225", fetcher=fetch)
+    assert calls[0]["instType"] == ["FUTURES"]
+    assert row["market_type"] == "dated_future"
+    with pytest.raises(ValueError, match="derivatives"):
+        collect_okx_open_interest_snapshot("BTC-USDT", fetcher=fetch)
+
