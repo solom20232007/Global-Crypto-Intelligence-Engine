@@ -103,7 +103,7 @@ This is a research and decision-support project, not financial advice. Any futur
 
 ## Public historical market-data backfill (research branch)
 
-The first public collectors support Binance spot OHLCV, Binance USDⓈ-M funding history, OKX historical candles, and OKX perpetual funding history. They use public endpoints and require no API keys.
+The public collectors support Binance spot OHLCV and USDⓈ-M funding, OKX historical candles and perpetual funding, Bybit linear/inverse funding and historical open interest, plus current Binance USDⓈ-M and OKX SWAP open-interest snapshots. They use public market-data endpoints and require no API keys.
 
 Install the project:
 
@@ -118,8 +118,12 @@ gcie-backfill binance-spot --instrument ABCUSDT --interval 1m --start-ms 1771027
 gcie-backfill binance-funding --instrument ABCUSDT --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/binance_ABCUSDT_funding.jsonl
 gcie-backfill okx-candles --instrument ABC-USDT --bar 1m --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/okx_ABC-USDT_1m.jsonl
 gcie-backfill okx-funding --instrument ABC-USDT-SWAP --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/okx_ABC-USDT-SWAP_funding.jsonl
+gcie-backfill bybit-funding --instrument ABCUSDT --category linear --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/bybit_ABCUSDT_funding.jsonl
+gcie-backfill bybit-open-interest --instrument ABCUSDT --category linear --interval 1h --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/bybit_ABCUSDT_oi_1h.jsonl
+gcie-backfill binance-open-interest-snapshot --instrument ABCUSDT --output data/raw/binance_ABCUSDT_oi_snapshot.jsonl
+gcie-backfill okx-open-interest-snapshot --instrument ABC-USDT-SWAP --output data/raw/okx_ABC-USDT-SWAP_oi_snapshot.jsonl
 ```
 
 Output is JSON Lines. Decimal values remain strings to avoid floating-point precision loss. The end timestamp is exclusive for candle backfills. These commands are per instrument; first discover each venue's historical instrument universe and then schedule bounded batches. Do not launch a nine-month 1-minute backfill for every symbol in one unbounded job.
 
-**Current limitations:** these first adapters do not yet persist raw response pages, maintain resumable checkpoints, collect OI snapshots, wallet transfers, liquidations, borrow rates, order-book depth, or Korean premium inputs. Funding history and OI history have provider-specific retention limits. A successful candle backfill must never be interpreted as proof that derivatives or wallet history is equally complete.
+**Current limitations:** these adapters write normalized JSONL only; they do not yet persist raw response pages or maintain resumable checkpoints. Binance and OKX OI commands are point-in-time snapshots, not historical backfills. Bybit OI is interval-based history (5m through 1d), while Bybit funding history is paginated by timestamp. Wallet transfers, liquidations, borrow rates, order-book depth, and Korean premium inputs remain unimplemented. Provider retention differs by endpoint, so coverage must be measured separately for every venue and metric.
