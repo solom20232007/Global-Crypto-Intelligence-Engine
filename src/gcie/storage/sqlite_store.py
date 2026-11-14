@@ -100,6 +100,12 @@ class SQLiteResearchStore:
         rows = list(observations)
         raw_json = json.dumps(raw_payload, ensure_ascii=False, sort_keys=True)
         with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT response_json FROM raw_pages WHERE page_key=?",
+                (page_key,),
+            ).fetchone()
+            if existing and existing[0] != raw_json:
+                raise ValueError("page_key already exists with a different raw payload")
             connection.execute(
                 """INSERT INTO raw_pages (
                     page_key, venue, metric, instrument, request_start_ms,
