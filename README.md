@@ -101,19 +101,19 @@ See [`.env.example`](.env.example). The initial application intentionally requir
 This is a research and decision-support project, not financial advice. Any future signal must be evaluated with fees, slippage, liquidity, and out-of-sample testing.
 
 
-## Public historical market-data backfill (research branch)
+## Public market-data collectors
 
-The public collectors support Binance spot OHLCV and USDⓈ-M funding, OKX historical candles and perpetual funding, Bybit linear/inverse funding and historical open interest, plus current Binance USDⓈ-M and OKX SWAP open-interest snapshots. They use public market-data endpoints and require no API keys.
+The current public collectors support Binance spot OHLCV and USDⓈ-M funding history, OKX historical candles and perpetual funding history, Bybit linear/inverse funding history and historical open interest, plus current Binance USDⓈ-M and OKX SWAP open-interest snapshots. These public endpoints do not require API keys.
 
 Install the project:
 
-```bash
+\`\`\`bash
 python -m pip install -e ".[dev]"
-```
+\`\`\`
 
-Example (replace the timestamps with the exact UTC epoch-millisecond window you want):
+Example (replace timestamps with the exact UTC epoch-millisecond window required):
 
-```bash
+\`\`\`bash
 gcie-backfill binance-spot --instrument ABCUSDT --interval 1m --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/binance_ABCUSDT_1m.jsonl
 gcie-backfill binance-funding --instrument ABCUSDT --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/binance_ABCUSDT_funding.jsonl
 gcie-backfill okx-candles --instrument ABC-USDT --bar 1m --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/okx_ABC-USDT_1m.jsonl
@@ -122,57 +122,52 @@ gcie-backfill bybit-funding --instrument ABCUSDT --category linear --start-ms 17
 gcie-backfill bybit-open-interest --instrument ABCUSDT --category linear --interval 1h --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/bybit_ABCUSDT_oi_1h.jsonl
 gcie-backfill binance-open-interest-snapshot --instrument ABCUSDT --output data/raw/binance_ABCUSDT_oi_snapshot.jsonl
 gcie-backfill okx-open-interest-snapshot --instrument ABC-USDT-SWAP --output data/raw/okx_ABC-USDT-SWAP_oi_snapshot.jsonl
-```
+\`\`\`
 
-Output is JSON Lines. Decimal values remain strings to avoid floating-point precision loss. The end timestamp is exclusive for candle backfills. These commands are per instrument; first discover each venue's historical instrument universe and then schedule bounded batches. Do not launch a nine-month 1-minute backfill for every symbol in one unbounded job.
+Output is JSON Lines. Decimal values remain strings to avoid floating-point precision loss. Time-range commands use a half-open range [start_ms, end_ms); the end timestamp is exclusive. These commands collect one instrument at a time. Use bounded batches; do not launch an unbounded nine-month, one-minute backfill for every symbol.
 
-**Current limitations:** these adapters write normalized JSONL only; they do not yet persist raw response pages or maintain resumable checkpoints. Binance and OKX OI commands are point-in-time snapshots, not historical backfills. Bybit OI is interval-based history (5m through 1d), while Bybit funding history is paginated by timestamp. Wallet transfers, liquidations, borrow rates, order-book depth, and Korean premium inputs remain unimplemented. Provider retention differs by endpoint, so coverage must be measured separately for every venue and metric.
+## Local SQLite storage and resumable backfills
 
-## Local transactional research storage (initial implementation)
+Range collectors accept --db to persist collection results in a local SQLite database. The store creates:
 
-The research branch now includes `gcie.storage.SQLiteResearchStore` as a local,
-dependency-free persistence foundation. It creates three tables:
+- raw_pages: raw provider response payloads and request-window metadata.
+- observations: normalized observations keyed by venue, market type, instrument, metric, and event timestamp.
+- checkpoints: completion state for each time partition.
 
-- `raw_pages`: original provider response JSON plus request window/cursor metadata.
-- `observations`: normalized observations keyed by venue, market type, instrument,
-  metric, and event timestamp.
-- `checkpoints`: per-venue/metric/instrument time-partition progress and opaque
-  provider cursor.
+Each **time partition** is currently collected as a unit. Its raw response pages, normalized observations, and checkpoint are committed in one SQLite transaction. Replaying a stable partition key is idempotent. Completed partitions are skipped on a rerun; partitions reaching into the future remain running and are collected again. SQLite WAL mode is enabled.
 
-Use `commit_page(...)` to write a raw response page, its normalized observations,
-and the associated checkpoint in one SQLite transaction. Replaying a stable
-`page_key` does not duplicate the raw page, and observation keys are upserted.
-SQLite WAL mode is enabled for safer local worker access.
+Example:
 
-**Important scope:** this is the first storage primitive, not yet wired into the
-Binance/OKX/Bybit collectors or a scheduled workflow. Existing CLI commands still
-write JSONL. The store currently provides local SQLite persistence only; it does
-not yet provide Supabase/PostgreSQL storage, distributed locking, retry/backoff,
-automatic gap detection, or a coverage manifest. Do not start the nine-month
-multi-symbol backfill until collector page capture, resume behavior, and bounded
-batch execution are integrated and tested.
+\`\`\`bash
+gcie-backfill binance-spot --instrument ABCUSDT --interval 1m \\
+  --start-ms 1771027200000 --end-ms 1771113600000 \\
+  --db data/raw/research.sqlite \\
+  --output data/processed/binance_ABCUSDT_1m.jsonl
+\`\`\`
 
-## Historical backfills
+- Default partition sizes are 1 day for candles, 7 days for open interest, and 30 days for funding. Override with --chunk-ms.
+- HTTP 429/5xx and network errors use bounded exponential backoff and respect Retry-After. HTTP 418 stops the run.
+- When --db and --output are both supplied, the JSONL file is rebuilt from **all stored observations in the requested range**, including partitions skipped during resume. Without --db, JSONL contains rows fetched during that run.
+- If a run is interrupted, rerun the same command and database path to skip completed partitions and fetch unfinished partitions.
 
-`gcie-backfill` collects public market data for a `[start, end)` range in UTC epoch
-milliseconds. With `--db`, each partition is committed to SQLite with its raw provider
-responses and a checkpoint, so an interrupted run can be repeated with the same command:
-completed partitions are skipped and collection resumes where it stopped.
+**Important current limitation:** resume is at the time-partition level, not at the individual API-page level. The collector holds a partition's fetched rows and recorded raw responses until that partition finishes, then commits them together. A failure within a partition can therefore require fetching that partition again. The next persistence improvement is page-level commits and cursor checkpoints, followed by explicit gap/coverage validation. The SQLite store is local only; distributed locking, Supabase/PostgreSQL storage, automated gap detection, and a coverage manifest are not yet implemented.
 
-```bash
-# Nine months of Binance 1m candles, resumable
-gcie-backfill binance-spot --instrument BTCUSDT --interval 1m \
-  --start-ms 1767225600000 --end-ms 1790812800000 --db data/raw/research.sqlite
+## Current data limitations
 
-# Same, also exporting the rows fetched in this run to JSONL
-gcie-backfill okx-funding --instrument BTC-USDT-SWAP \
-  --start-ms 1767225600000 --end-ms 1790812800000 \
-  --db data/raw/research.sqlite --output data/processed/okx_funding.jsonl
-```
+Binance and OKX open-interest commands are current snapshots, not historical OI backfills. Bybit OI is interval-based history (5m through 1d). Wallet transfers, liquidation history, borrow/lending rates, historical order-book depth, and the full Korean premium inputs are not yet implemented. Historical retention and availability differ by endpoint, so coverage must be measured separately for each venue and metric before attempting the nine-month research dataset.
 
-- Requests retry HTTP 429/5xx and network errors with exponential backoff and honour
-  `Retry-After`. HTTP 418 (Binance IP ban) stops the run immediately.
-- Partitions that reach into the future are stored as `running` and refreshed next run.
-- `--chunk-ms` changes the partition size; defaults are 1 day for candles, 7 days for
-  open interest, and 30 days for funding.
+## Roadmap
 
+1. Complete resilient collection: page-level persistence, cursor resume, retries, and gap/coverage checks.
+2. Build and maintain exchange instrument universes and bounded collection schedules.
+3. Expand futures, order-book, on-chain, and regional market intelligence.
+4. Build the historical explosion lifecycle dataset and point-in-time labels.
+5. Implement feature engineering and leakage audits.
+6. Validate Discovery with walk-forward and out-of-sample tests.
+7. Research Entry confirmation.
+8. Research holding, reduction, and exit decisions.
+9. Add Telegram alerts, monitoring, paper trading, and operational hardening.
+
+## Disclaimer
+
+This is a research and decision-support project, not financial advice. Any future signal must be evaluated with fees, slippage, liquidity, and out-of-sample testing.
