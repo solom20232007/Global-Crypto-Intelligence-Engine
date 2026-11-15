@@ -205,21 +205,40 @@ class SQLiteResearchStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def iter_observations(
+        self, *, venue: str, metric: str, instrument: str, start_ms: int, end_ms: int,
+        batch_size: int = 5_000,
+    ) -> Iterator[dict[str, Any]]:
+        """Stream observations for one instrument in [start_ms, end_ms), oldest first.
+
+        Rows are fetched in batches inside one read transaction, so memory use stays
+        flat for multi-month 1-minute ranges and the result is a consistent snapshot.
+        """
+        if start_ms < 0 or end_ms <= start_ms:
+            raise ValueError("Require 0 <= start_ms < end_ms")
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """SELECT payload_json FROM observations
+                WHERE venue=? AND metric=? AND instrument=?
+                  AND event_time_ms >= ? AND event_time_ms < ?
+                ORDER BY event_time_ms, market_type""",
+                (venue, metric, instrument, start_ms, end_ms),
+            )
+            while batch := cursor.fetchmany(batch_size):
+                for (payload_json,) in batch:
+                    yield json.loads(payload_json)
+
     def get_observations(
         self, *, venue: str, metric: str, instrument: str, start_ms: int, end_ms: int
     ) -> list[dict[str, Any]]:
         """Return observations for one instrument in the half-open time range."""
-        if start_ms < 0 or end_ms <= start_ms:
-            raise ValueError("Require 0 <= start_ms < end_ms")
-        with self._connect() as connection:
-            rows = connection.execute(
-                """SELECT payload_json FROM observations
-                WHERE venue=? AND metric=? AND instrument=?
-                  AND event_time_ms >= ? AND event_time_ms < ?
-                ORDER BY event_time_ms""",
-                (venue, metric, instrument, start_ms, end_ms),
-            ).fetchall()
-        return [json.loads(row[0]) for row in rows]
+        return list(self.iter_observations(
+            venue=venue, metric=metric, instrument=instrument,
+            start_ms=start_ms, end_ms=end_ms,
+        ))
+
     def counts(self) -> dict[str, int]:
         with self._connect() as connection:
             return {
