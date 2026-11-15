@@ -205,6 +205,21 @@ class SQLiteResearchStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def get_observations(
+        self, *, venue: str, metric: str, instrument: str, start_ms: int, end_ms: int
+    ) -> list[dict[str, Any]]:
+        """Return observations for one instrument in the half-open time range."""
+        if start_ms < 0 or end_ms <= start_ms:
+            raise ValueError("Require 0 <= start_ms < end_ms")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT payload_json FROM observations
+                WHERE venue=? AND metric=? AND instrument=?
+                  AND event_time_ms >= ? AND event_time_ms < ?
+                ORDER BY event_time_ms""",
+                (venue, metric, instrument, start_ms, end_ms),
+            ).fetchall()
+        return [json.loads(row[0]) for row in rows]
     def counts(self) -> dict[str, int]:
         with self._connect() as connection:
             return {
