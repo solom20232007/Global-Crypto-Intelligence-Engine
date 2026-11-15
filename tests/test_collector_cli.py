@@ -157,3 +157,35 @@ def test_lowercase_instrument_is_normalised(tmp_path):
         "--end-ms", str(HOUR), "--db", str(db),
     ], fetcher=fetch, now_ms=10 * HOUR)
     assert SQLiteResearchStore(db).counts()["observations"] == 60
+
+
+def test_jsonl_export_from_db_includes_skipped_partitions_after_resume(tmp_path):
+    db = tmp_path / "research.sqlite"
+    out = tmp_path / "complete.jsonl"
+    argv = [
+        "binance-spot", "--instrument", "ABCUSDT", "--start-ms", "0",
+        "--end-ms", str(3 * HOUR), "--chunk-ms", str(HOUR),
+        "--db", str(db), "--output", str(out),
+    ]
+    now = 10 * HOUR
+
+    # First partition commits, then the next request fails.
+    fetch, _ = fake_binance_klines(180, fail_after_calls=1)
+    with pytest.raises(ConnectionError):
+        main(argv, fetcher=fetch, now_ms=now)
+    assert not out.exists()
+
+    # Resume skips the first partition, but export contains every stored row.
+    fetch, _ = fake_binance_klines(180)
+    main(argv, fetcher=fetch, now_ms=now)
+    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 180
+    assert [row["event_time_ms"] for row in rows] == list(range(0, 180 * MINUTE, MINUTE))
+    assert all(row["metric"] == "ohlcv_1m" for row in rows)
+
+    # A fully skipped rerun must still produce the complete JSONL export.
+    fetch, calls = fake_binance_klines(180)
+    main(argv, fetcher=fetch, now_ms=now)
+    assert calls == []
+    rows_again = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert rows_again == rows
