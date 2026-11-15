@@ -85,7 +85,7 @@ See [`.env.example`](.env.example). The initial application intentionally requir
 
 ## Public market-data collectors
 
-The current public collectors support Binance spot OHLCV and USDⓈ-M funding history, OKX historical candles and perpetual funding history, Bybit linear/inverse funding history and historical open interest, plus current Binance USDⓈ-M and OKX SWAP open-interest snapshots. These public endpoints do not require API keys.
+The current public collectors support Binance spot OHLCV and USDⓈ-M funding history, OKX historical candles and perpetual funding history, Bybit linear/inverse funding history and historical open interest, plus current Binance USDⓈ-M and OKX SWAP/FUTURES/OPTION open-interest snapshots. OKX instruments are classified from their instId (`BTC-USDT` spot, `BTC-USDT-SWAP` perpetual, `BTC-USD-261225` dated future, `BTC-USD-261225-60000-C` option). These public endpoints do not require API keys.
 
 Install the project:
 
@@ -106,7 +106,7 @@ gcie-backfill binance-open-interest-snapshot --instrument ABCUSDT --output data/
 gcie-backfill okx-open-interest-snapshot --instrument ABC-USDT-SWAP --output data/raw/okx_ABC-USDT-SWAP_oi_snapshot.jsonl
 ```
 
-Output is JSON Lines. Decimal values remain strings to avoid floating-point precision loss. Time-range commands use a half-open range [start_ms, end_ms); the end timestamp is exclusive. These commands collect one instrument at a time. Use bounded batches; do not launch an unbounded nine-month, one-minute backfill for every symbol.
+Output is JSON Lines. Decimal values remain strings to avoid floating-point precision loss. Candles that are still open are dropped, so every exported candle is final. In CLI output the `metric` field names the stream, including the interval where there is one (`ohlcv_1m`, `open_interest_linear_1h`, `funding_rate`), whether or not `--db` is used. Time-range commands use a half-open range [start_ms, end_ms); the end timestamp is exclusive. These commands collect one instrument at a time. Use bounded batches; do not launch an unbounded nine-month, one-minute backfill for every symbol.
 
 ## Local SQLite storage and resumable backfills
 
@@ -121,15 +121,16 @@ Each **time partition** is currently collected as a unit. Its raw response pages
 Example:
 
 ```bash
-gcie-backfill binance-spot --instrument ABCUSDT --interval 1m \\
-  --start-ms 1771027200000 --end-ms 1771113600000 \\
-  --db data/raw/research.sqlite \\
+gcie-backfill binance-spot --instrument ABCUSDT --interval 1m \
+  --start-ms 1771027200000 --end-ms 1771113600000 \
+  --db data/raw/research.sqlite \
   --output data/processed/binance_ABCUSDT_1m.jsonl
 ```
 
 - Default partition sizes are 1 day for candles, 7 days for open interest, and 30 days for funding. Override with --chunk-ms.
 - HTTP 429/5xx and network errors use bounded exponential backoff and respect Retry-After. HTTP 418 stops the run.
-- When --db and --output are both supplied, the JSONL file is rebuilt from **all stored observations in the requested range**, including partitions skipped during resume. Without --db, JSONL contains rows fetched during that run.
+- When --db and --output are both supplied, the JSONL file is rebuilt from **all stored observations in the requested range**, including partitions skipped during resume. Without --db, JSONL contains rows fetched during that run. The export is streamed from SQLite in batches, so memory use stays flat for long 1-minute ranges.
+- JSONL files are written atomically: output goes to a temporary file that replaces the target only when complete, so a failed run leaves the previous file untouched instead of a truncated one.
 - If a run is interrupted, rerun the same command and database path to skip completed partitions and fetch unfinished partitions.
 
 **Important current limitation:** resume is at the time-partition level, not at the individual API-page level. The collector holds a partition's fetched rows and recorded raw responses until that partition finishes, then commits them together. A failure within a partition can therefore require fetching that partition again. The next persistence improvement is page-level commits and cursor checkpoints, followed by explicit gap/coverage validation. The SQLite store is local only; distributed locking, Supabase/PostgreSQL storage, automated gap detection, and a coverage manifest are not yet implemented.

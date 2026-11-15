@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
@@ -32,7 +34,9 @@ from gcie.storage.sqlite_store import SQLiteResearchStore
 
 DAY_MS = 86_400_000
 
-RangeCollector = Callable[[argparse.Namespace, int, int, JsonFetcher], list[dict[str, Any]]]
+RangeCollector = Callable[
+    [argparse.Namespace, int, int, JsonFetcher, int], list[dict[str, Any]]
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,15 +51,15 @@ RANGE_COMMANDS: dict[str, RangeCommand] = {
     "binance-spot": RangeCommand(
         "binance",
         lambda a: f"ohlcv_{a.interval}",
-        lambda a, s, e, f: collect_binance_spot_klines(
-            a.instrument, a.interval, s, e, limit=a.limit, fetcher=f
+        lambda a, s, e, f, now: collect_binance_spot_klines(
+            a.instrument, a.interval, s, e, limit=a.limit, fetcher=f, now_ms=now
         ),
         DAY_MS,
     ),
     "binance-funding": RangeCommand(
         "binance",
         lambda a: "funding_rate",
-        lambda a, s, e, f: collect_binance_funding_rates(
+        lambda a, s, e, f, _now: collect_binance_funding_rates(
             a.instrument, s, e, limit=a.limit, fetcher=f
         ),
         30 * DAY_MS,
@@ -63,7 +67,7 @@ RANGE_COMMANDS: dict[str, RangeCommand] = {
     "okx-candles": RangeCommand(
         "okx",
         lambda a: f"ohlcv_{a.bar}",
-        lambda a, s, e, f: collect_okx_history_candles(
+        lambda a, s, e, f, _now: collect_okx_history_candles(
             a.instrument, a.bar, s, e, limit=a.limit, fetcher=f
         ),
         DAY_MS,
@@ -71,7 +75,7 @@ RANGE_COMMANDS: dict[str, RangeCommand] = {
     "okx-funding": RangeCommand(
         "okx",
         lambda a: "funding_rate",
-        lambda a, s, e, f: collect_okx_funding_history(
+        lambda a, s, e, f, _now: collect_okx_funding_history(
             a.instrument, s, e, limit=a.limit, fetcher=f
         ),
         30 * DAY_MS,
@@ -79,7 +83,7 @@ RANGE_COMMANDS: dict[str, RangeCommand] = {
     "bybit-funding": RangeCommand(
         "bybit",
         lambda a: f"funding_rate_{a.category}",
-        lambda a, s, e, f: collect_bybit_funding_history(
+        lambda a, s, e, f, _now: collect_bybit_funding_history(
             a.category, a.instrument, s, e, limit=a.limit, fetcher=f
         ),
         30 * DAY_MS,
@@ -87,7 +91,7 @@ RANGE_COMMANDS: dict[str, RangeCommand] = {
     "bybit-open-interest": RangeCommand(
         "bybit",
         lambda a: f"open_interest_{a.category}_{a.interval}",
-        lambda a, s, e, f: collect_bybit_open_interest_history(
+        lambda a, s, e, f, _now: collect_bybit_open_interest_history(
             a.category, a.instrument, a.interval, s, e, limit=a.limit, fetcher=f
         ),
         7 * DAY_MS,
@@ -132,7 +136,8 @@ def build_parser() -> argparse.ArgumentParser:
         )
         command.add_argument(
             "--output", type=Path,
-            help="JSONL output path; with --db, exports the complete requested range from SQLite",
+            help="JSONL output path; with --db, exports the complete requested range from "
+                 "SQLite. Written atomically: the file only appears once complete",
         )
         command.add_argument(
             "--db", type=Path,
@@ -173,7 +178,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     for name, help_text in (
         ("binance-open-interest-snapshot", "Collect current Binance USDⓈ-M open interest"),
-        ("okx-open-interest-snapshot", "Collect current OKX SWAP open interest"),
+        ("okx-open-interest-snapshot", "Collect current OKX SWAP/FUTURES/OPTION open interest"),
     ):
         command = subparsers.add_parser(name, help=help_text)
         command.add_argument(
@@ -207,13 +212,37 @@ def collect(args: argparse.Namespace, fetcher: JsonFetcher = public_json) -> lis
     if args.command in SNAPSHOT_COMMANDS:
         return [SNAPSHOT_COMMANDS[args.command](args.instrument, fetcher)]
     if args.command in RANGE_COMMANDS:
-        return RANGE_COMMANDS[args.command].collect(args, args.start_ms, args.end_ms, fetcher)
+        return RANGE_COMMANDS[args.command].collect(
+            args, args.start_ms, args.end_ms, fetcher, int(time.time() * 1000)
+        )
     raise ValueError(f"Unsupported command: {args.command}")
 
 
-def _write_rows(output: TextIO, rows: Sequence[dict[str, Any]]) -> None:
+def _write_rows(output: TextIO, rows: Iterable[dict[str, Any]]) -> int:
+    count = 0
     for row in rows:
         output.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+        count += 1
+    return count
+
+
+@contextmanager
+def atomic_jsonl(path: Path) -> Iterator[TextIO]:
+    """Write to a temporary sibling file and move it into place only on success.
+
+    A crash mid-write leaves the previous file (if any) untouched instead of a
+    truncated file that looks complete.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as output:
+            yield output
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def run_range_command(
@@ -231,15 +260,15 @@ def run_range_command(
     now = int(time.time() * 1000) if now_ms is None else now_ms
     store = SQLiteResearchStore(args.db) if args.db else None
 
-    stats = {"partitions": 0, "skipped": 0, "committed": 0, "partial": 0, "rows": 0}
+    stats = {
+        "partitions": 0, "skipped": 0, "committed": 0, "partial": 0, "rows": 0, "exported": 0,
+    }
+    # Every CLI row carries the stream metric (e.g. "ohlcv_1m"), with or without
+    # --db, so JSONL produced either way has the same schema.
     # Without SQLite, JSONL contains rows fetched in this run.
     # With SQLite, rebuild the full requested export after collection so skipped
     # partitions and a crash between DB commit and file write cannot lose output.
-    output = None
-    if args.output and store is None:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        output = args.output.open("w", encoding="utf-8")
-    try:
+    with _optional_atomic_jsonl(args.output if store is None else None) as output:
         for start, end in iter_partitions(args.start_ms, args.end_ms, chunk_ms):
             stats["partitions"] += 1
             key = {
@@ -253,13 +282,14 @@ def run_range_command(
                     continue
 
             recorder = RecordingFetcher(fetcher)
-            rows = spec.collect(args, start, end, recorder)
+            rows = [{**row, "metric": stream} for row in spec.collect(
+                args, start, end, recorder, now
+            )]
             # A partition reaching into the future may still change (open candle,
             # upcoming funding), so it stays 'running' and is fetched again next run.
             complete = end <= now
 
             if store is not None:
-                stored_rows = [{**row, "metric": stream} for row in rows]
                 page_key = f"{spec.venue}:{stream}:{args.instrument}:{start}-{end}"
                 if not complete:
                     page_key += f"@{now}"
@@ -267,13 +297,12 @@ def run_range_command(
                     **key,
                     page_key=page_key,
                     raw_payload=recorder.pages,
-                    observations=stored_rows,
+                    observations=rows,
                     next_cursor=str(end),
                     status="complete" if complete else "running",
                 )
             if output is not None:
-                _write_rows(output, rows)
-                output.flush()
+                stats["exported"] += _write_rows(output, rows)
 
             stats["committed" if complete else "partial"] += 1
             stats["rows"] += len(rows)
@@ -282,16 +311,12 @@ def run_range_command(
                             "status": "complete" if complete else "running"}),
                 file=log,
             )
-    finally:
-        if output is not None:
-            output.close()
 
     if args.output and store is not None:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        with args.output.open("w", encoding="utf-8") as exported:
-            _write_rows(
+        with atomic_jsonl(args.output) as exported:
+            stats["exported"] = _write_rows(
                 exported,
-                store.get_observations(
+                store.iter_observations(
                     venue=spec.venue,
                     metric=stream,
                     instrument=args.instrument,
@@ -300,6 +325,15 @@ def run_range_command(
                 ),
             )
     return stats
+
+
+@contextmanager
+def _optional_atomic_jsonl(path: Path | None) -> Iterator[TextIO | None]:
+    if path is None:
+        yield None
+        return
+    with atomic_jsonl(path) as output:
+        yield output
 
 
 def main(
@@ -314,8 +348,7 @@ def main(
 
     if args.command in SNAPSHOT_COMMANDS:
         rows = collect(args, fetcher)
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        with args.output.open("w", encoding="utf-8") as output:
+        with atomic_jsonl(args.output) as output:
             _write_rows(output, rows)
         summary.update({"rows_written": len(rows), "output": str(args.output)})
     else:
@@ -335,6 +368,7 @@ def main(
             "partitions_committed": stats["committed"],
             "partitions_partial": stats["partial"],
             "rows_fetched": stats["rows"],
+            "rows_exported": stats["exported"] if args.output else None,
             "output": str(args.output) if args.output else None,
             "db": str(args.db) if args.db else None,
         })

@@ -146,7 +146,8 @@ def test_jsonl_output_still_works_without_db(tmp_path):
     ], fetcher=fetch, now_ms=10 * HOUR)
     lines = out.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 120
-    assert json.loads(lines[0])["metric"] == "ohlcv"
+    # Same schema as the --db export: the metric names the interval.
+    assert json.loads(lines[0])["metric"] == "ohlcv_1m"
 
 
 def test_lowercase_instrument_is_normalised(tmp_path):
@@ -189,3 +190,66 @@ def test_jsonl_export_from_db_includes_skipped_partitions_after_resume(tmp_path)
     assert calls == []
     rows_again = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
     assert rows_again == rows
+
+
+def test_jsonl_schema_is_identical_with_and_without_db(tmp_path):
+    base = [
+        "binance-spot", "--instrument", "ABCUSDT", "--start-ms", "0",
+        "--end-ms", str(HOUR),
+    ]
+    fetch, _ = fake_binance_klines(60)
+    main([*base, "--output", str(tmp_path / "plain.jsonl")], fetcher=fetch, now_ms=10 * HOUR)
+    main([*base, "--output", str(tmp_path / "db.jsonl"), "--db", str(tmp_path / "x.sqlite")],
+         fetcher=fetch, now_ms=10 * HOUR)
+    plain = (tmp_path / "plain.jsonl").read_text(encoding="utf-8")
+    exported = (tmp_path / "db.jsonl").read_text(encoding="utf-8")
+    assert plain == exported
+
+
+@pytest.mark.parametrize("with_db", [False, True])
+def test_failed_run_keeps_previous_export_and_leaves_no_temp_file(tmp_path, with_db):
+    out = tmp_path / "rows.jsonl"
+    out.write_text("previous complete export\n", encoding="utf-8")
+    argv = [
+        "binance-spot", "--instrument", "ABCUSDT", "--start-ms", "0",
+        "--end-ms", str(3 * HOUR), "--chunk-ms", str(HOUR), "--output", str(out),
+    ]
+    if with_db:
+        argv += ["--db", str(tmp_path / "x.sqlite")]
+    fetch, _ = fake_binance_klines(180, fail_after_calls=1)
+    with pytest.raises(ConnectionError):
+        main(argv, fetcher=fetch, now_ms=10 * HOUR)
+    assert out.read_text(encoding="utf-8") == "previous complete export\n"
+    assert sorted(p.name for p in tmp_path.iterdir() if p.suffix == ".tmp") == []
+
+
+def test_export_from_db_streams_in_batches(tmp_path):
+    db = tmp_path / "x.sqlite"
+    fetch, _ = fake_binance_klines(180)
+    main([
+        "binance-spot", "--instrument", "ABCUSDT", "--start-ms", "0",
+        "--end-ms", str(3 * HOUR), "--db", str(db),
+    ], fetcher=fetch, now_ms=10 * HOUR)
+    store = SQLiteResearchStore(db)
+    stream = store.iter_observations(
+        venue="binance", metric="ohlcv_1m", instrument="ABCUSDT",
+        start_ms=0, end_ms=3 * HOUR, batch_size=7,
+    )
+    assert not isinstance(stream, list)
+    times = [row["event_time_ms"] for row in stream]
+    assert times == list(range(0, 180 * MINUTE, MINUTE))
+    assert store.get_observations(
+        venue="binance", metric="ohlcv_1m", instrument="ABCUSDT",
+        start_ms=HOUR, end_ms=2 * HOUR,
+    )[0]["event_time_ms"] == HOUR
+
+
+def test_summary_reports_exported_rows(tmp_path, capsys):
+    fetch, _ = fake_binance_klines(60)
+    main([
+        "binance-spot", "--instrument", "ABCUSDT", "--start-ms", "0", "--end-ms", str(HOUR),
+        "--db", str(tmp_path / "x.sqlite"), "--output", str(tmp_path / "o.jsonl"),
+    ], fetcher=fetch, now_ms=10 * HOUR)
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["rows_exported"] == 60
+
