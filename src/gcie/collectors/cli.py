@@ -132,8 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
         command.add_argument(
             "--output", type=Path,
-            help="JSONL path for rows fetched in this run (partitions skipped on resume "
-                 "are not re-exported)",
+            help="JSONL output path; with --db, exports the complete requested range from SQLite",
         )
         command.add_argument(
             "--db", type=Path,
@@ -233,8 +232,11 @@ def run_range_command(
     store = SQLiteResearchStore(args.db) if args.db else None
 
     stats = {"partitions": 0, "skipped": 0, "committed": 0, "partial": 0, "rows": 0}
+    # Without SQLite, JSONL contains rows fetched in this run.
+    # With SQLite, rebuild the full requested export after collection so skipped
+    # partitions and a crash between DB commit and file write cannot lose output.
     output = None
-    if args.output:
+    if args.output and store is None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         output = args.output.open("w", encoding="utf-8")
     try:
@@ -283,6 +285,20 @@ def run_range_command(
     finally:
         if output is not None:
             output.close()
+
+    if args.output and store is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        with args.output.open("w", encoding="utf-8") as exported:
+            _write_rows(
+                exported,
+                store.get_observations(
+                    venue=spec.venue,
+                    metric=stream,
+                    instrument=args.instrument,
+                    start_ms=args.start_ms,
+                    end_ms=args.end_ms,
+                ),
+            )
     return stats
 
 
