@@ -62,7 +62,7 @@ reports/
 
 ## Development status
 
-**Phase 0 — foundation** is being established: repository conventions, safe configuration, health checks, and continuous integration. No live market collection or trading signals are enabled yet.
+The repository now includes public market-data collectors and a local SQLite persistence foundation. It is not yet a complete multi-exchange intelligence engine, and production discovery/entry signals or automated trading are not enabled.
 
 ## Local setup
 
@@ -83,37 +83,19 @@ Copy `.env.example` to `.env` for local configuration. Never commit the real `.e
 
 See [`.env.example`](.env.example). The initial application intentionally requires no API keys to run its health check and test suite.
 
-## Roadmap
-
-1. Foundation, CI, configuration, and security.
-2. Data-source inventory and exchange capability matrix.
-3. Market universe and spot-candle collection.
-4. Futures, order-book, and on-chain intelligence.
-5. Historical explosion lifecycle dataset and labels.
-6. Point-in-time feature engineering and leakage audits.
-7. Discovery research and walk-forward validation.
-8. Entry confirmation research.
-9. Holding, reduction, and exit research.
-10. Telegram alerts, monitoring, paper trading, and operational hardening.
-
-## Disclaimer
-
-This is a research and decision-support project, not financial advice. Any future signal must be evaluated with fees, slippage, liquidity, and out-of-sample testing.
-
-
 ## Public market-data collectors
 
 The current public collectors support Binance spot OHLCV and USDⓈ-M funding history, OKX historical candles and perpetual funding history, Bybit linear/inverse funding history and historical open interest, plus current Binance USDⓈ-M and OKX SWAP open-interest snapshots. These public endpoints do not require API keys.
 
 Install the project:
 
-\`\`\`bash
+```bash
 python -m pip install -e ".[dev]"
-\`\`\`
+```
 
 Example (replace timestamps with the exact UTC epoch-millisecond window required):
 
-\`\`\`bash
+```bash
 gcie-backfill binance-spot --instrument ABCUSDT --interval 1m --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/binance_ABCUSDT_1m.jsonl
 gcie-backfill binance-funding --instrument ABCUSDT --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/binance_ABCUSDT_funding.jsonl
 gcie-backfill okx-candles --instrument ABC-USDT --bar 1m --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/okx_ABC-USDT_1m.jsonl
@@ -122,7 +104,7 @@ gcie-backfill bybit-funding --instrument ABCUSDT --category linear --start-ms 17
 gcie-backfill bybit-open-interest --instrument ABCUSDT --category linear --interval 1h --start-ms 1771027200000 --end-ms 1771113600000 --output data/raw/bybit_ABCUSDT_oi_1h.jsonl
 gcie-backfill binance-open-interest-snapshot --instrument ABCUSDT --output data/raw/binance_ABCUSDT_oi_snapshot.jsonl
 gcie-backfill okx-open-interest-snapshot --instrument ABC-USDT-SWAP --output data/raw/okx_ABC-USDT-SWAP_oi_snapshot.jsonl
-\`\`\`
+```
 
 Output is JSON Lines. Decimal values remain strings to avoid floating-point precision loss. Time-range commands use a half-open range [start_ms, end_ms); the end timestamp is exclusive. These commands collect one instrument at a time. Use bounded batches; do not launch an unbounded nine-month, one-minute backfill for every symbol.
 
@@ -138,12 +120,12 @@ Each **time partition** is currently collected as a unit. Its raw response pages
 
 Example:
 
-\`\`\`bash
+```bash
 gcie-backfill binance-spot --instrument ABCUSDT --interval 1m \\
   --start-ms 1771027200000 --end-ms 1771113600000 \\
   --db data/raw/research.sqlite \\
   --output data/processed/binance_ABCUSDT_1m.jsonl
-\`\`\`
+```
 
 - Default partition sizes are 1 day for candles, 7 days for open interest, and 30 days for funding. Override with --chunk-ms.
 - HTTP 429/5xx and network errors use bounded exponential backoff and respect Retry-After. HTTP 418 stops the run.
